@@ -12,6 +12,12 @@ export default function DashboardPage() {
 
   useEffect(() => {
     loadData()
+    // Polling cada 10 segundos para actualizar dashboard
+    const interval = setInterval(() => {
+      loadData()
+      refreshAuth() // Actualizar balance del usuario
+    }, 10000)
+    return () => clearInterval(interval)
   }, [])
 
   const loadData = async () => {

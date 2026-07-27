@@ -6,7 +6,7 @@ const Deposit = {
     const result = await query(
       `INSERT INTO deposits (user_id, wallet_id, tx_hash, amount, block_number, status)
        VALUES (?, ?, ?, ?, ?, ?)`,
-      [userId, walletId, txHash, amount, blockNumber, DEPOSIT_STATUS.PENDING]
+      [userId, walletId, txHash, amount, blockNumber || null, DEPOSIT_STATUS.PENDING]
     );
     return result.insertId;
   },

@@ -5,7 +5,8 @@ import cron from 'node-cron';
 import DepositService from '../services/DepositService.js';
 import logger from '../config/logger.js';
 
-const CRON_SCHEDULE = process.env.DEPOSIT_CRON || '*/15 * * * *';
+// Usamos 6 asteriscos (*/15 * * * * *) para indicar SEGUNDOS en node-cron
+const CRON_SCHEDULE = process.env.DEPOSIT_CRON || '*/15 * * * * *';
 
 let isRunning = false;
 
@@ -19,16 +20,16 @@ async function runDepositMonitor() {
   const startTime = Date.now();
 
   try {
-    logger.info('Iniciando monitor de depositos...');
+    logger.info('🔍 [MONITOR] Escaneando blockchain (Nile) en busca de depósitos...');
     const results = await DepositService.checkAllDeposits();
     const duration = Date.now() - startTime;
 
-    logger.info('Monitor de depositos finalizado', {
+    logger.info('✅ [MONITOR] Verificación completada', {
       ...results,
       duration: `${duration}ms`,
     });
   } catch (err) {
-    logger.error('Error en monitor de depositos', {
+    logger.error('❌ [MONITOR] Error verificando depósitos', {
       error: err.message,
       stack: err.stack,
     });
@@ -37,16 +38,16 @@ async function runDepositMonitor() {
   }
 }
 
-logger.info(`Monitor de depositos iniciado con cron: ${CRON_SCHEDULE}`);
+logger.info(`🚀 Monitor de depositos iniciado con cron: ${CRON_SCHEDULE}`);
 
+// 1. Ejecución inmediata al encender el servicio para no esperar el primer intervalo
+runDepositMonitor();
+
+// 2. Programación del Cron cada 15 segundos
 cron.schedule(CRON_SCHEDULE, runDepositMonitor, {
   scheduled: true,
   timezone: 'UTC',
 });
-
-if (process.env.RUN_IMMEDIATE === 'true') {
-  runDepositMonitor();
-}
 
 process.on('SIGTERM', () => {
   logger.info('Monitor de depositos detenido (SIGTERM)');

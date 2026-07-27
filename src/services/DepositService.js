@@ -5,23 +5,31 @@ import User from '../models/User.js';
 import AuditLog from '../models/AuditLog.js';
 import blockchainConfig from '../config/blockchain.js';
 import { DEPOSIT_STATUS, AUDIT_ACTIONS, TOKEN } from '../utils/constants.js';
-import { toChainAmount } from '../utils/crypto.js';
 import logger from '../config/logger.js';
 import { transaction } from '../config/database.js';
 
+// Instancia base de Axios
 const tronGridApi = axios.create({
   baseURL: blockchainConfig.fullNode,
   headers: {
-    'TRON-PRO-API-KEY': blockchainConfig.apiKey,
     'Content-Type': 'application/json',
   },
   timeout: 15000,
 });
 
+// Interceptor para inyectar TRON-PRO-API-KEY solo si está presente en la config
+tronGridApi.interceptors.request.use((config) => {
+  const apiKey = blockchainConfig.apiKey || process.env.TRONGRID_API_KEY;
+  if (apiKey && apiKey.trim() !== '') {
+    config.headers['TRON-PRO-API-KEY'] = apiKey.trim();
+  }
+  return config;
+});
+
 const DepositService = {
   /**
-   * Consulta TronGrid para detectar nuevos depositos USDT TRC-20
-   * en una direccion especifica.
+   * Consulta TronGrid para detectar nuevos depósitos USDT TRC-20
+   * en una dirección específica.
    */
   async checkAddressDeposits(walletAddress) {
     try {
@@ -31,8 +39,6 @@ const DepositService = {
           params: {
             contract_address: blockchainConfig.usdtContract,
             limit: 50,
-            order_by: 'block_timestamp',
-            order: 'desc',
           },
         }
       );
@@ -41,14 +47,29 @@ const DepositService = {
       const currentBlock = await getCurrentBlock();
       const newDeposits = [];
 
-      for (const tx of transactions) {
-        if (tx.type !== 'Transfer' && tx.type !== 'TransferAsset') continue;
+      logger.info(`📊 [DEPOSIT SERVICE] Transacciones encontradas para ${walletAddress}:`, {
+        total: transactions.length,
+        currentBlock,
+      });
 
+      for (const tx of transactions) {
+        logger.info(`🔍 [DEPOSIT SERVICE] Procesando transacción:`, {
+          tx_id: tx.transaction_id,
+          from: tx.from,
+          to: tx.to,
+          value: tx.value,
+          block: tx.block_timestamp,
+        });
+        // En algunas respuestas de TronGrid no viene tx.type, se valida por 'to' y 'value'
         const toAddress = tx.to;
-        if (toAddress !== walletAddress) continue;
+        
+        // Normalización para comparar direcciones
+        if (!toAddress || toAddress.toLowerCase() !== walletAddress.toLowerCase()) {
+          continue;
+        }
 
         const value = extractTransferValue(tx);
-        if (!value || value === '0') continue;
+        if (!value || parseFloat(value) <= 0) continue;
 
         const existing = await Deposit.findByTxHash(tx.transaction_id);
         if (existing) {
@@ -66,15 +87,30 @@ const DepositService = {
         }
 
         const wallet = await Wallet.findByAddress(walletAddress);
-        if (!wallet) continue;
+        if (!wallet) {
+          logger.warn(`⚠️ Wallet no encontrada en DB para la dirección: ${walletAddress}`);
+          continue;
+        }
 
         const confirmations = currentBlock - (tx.block_number || 0);
+        
+        // TronGrid no siempre devuelve block_number, usar 0 como fallback
+        const blockNumber = tx.block_number || null;
+        
+        logger.info(`💾 [DEPOSIT SERVICE] Creando depósito en DB:`, {
+          userId: wallet.user_id,
+          walletId: wallet.id,
+          txHash: tx.transaction_id,
+          amount: value,
+          blockNumber: blockNumber,
+        });
+        
         const depositId = await Deposit.create({
           userId: wallet.user_id,
           walletId: wallet.id,
           txHash: tx.transaction_id,
           amount: value,
-          blockNumber: tx.block_number,
+          blockNumber: blockNumber,
         });
 
         await Wallet.updateLastCheck(wallet.id);
@@ -87,8 +123,8 @@ const DepositService = {
           details: { txHash: tx.transaction_id, amount: value, address: walletAddress },
         });
 
-        logger.info('Deposito detectado', {
-          walletAddress: walletAddress.substring(0, 8) + '...',
+        logger.info('💰 [DEPOSIT SERVICE] ¡Depósito detectado en Nile!', {
+          walletAddress,
           txHash: tx.transaction_id,
           amount: value,
           confirmations,
@@ -96,7 +132,13 @@ const DepositService = {
 
         if (confirmations >= blockchainConfig.minConfirmations) {
           await Deposit.markConfirmed(depositId);
-          await creditBalance({ id: depositId, user_id: wallet.user_id, amount: value, wallet_id: wallet.id });
+          await creditBalance({ 
+            id: depositId, 
+            user_id: wallet.user_id, 
+            amount: value, 
+            wallet_id: wallet.id,
+            tx_hash: tx.transaction_id 
+          });
           newDeposits.push({ id: depositId, status: DEPOSIT_STATUS.CREDITED });
         } else {
           await Deposit.updateStatus(depositId, DEPOSIT_STATUS.CONFIRMING);
@@ -107,8 +149,8 @@ const DepositService = {
       return newDeposits;
     } catch (err) {
       if (err.response?.status === 404) return [];
-      logger.error('Error consultando depositos', {
-        address: walletAddress.substring(0, 8) + '...',
+      logger.error('Error consultando depósitos', {
+        address: walletAddress,
         error: err.message,
       });
       throw err;
@@ -116,10 +158,15 @@ const DepositService = {
   },
 
   /**
-   * Verifica todas las wallets activas en busca de nuevos depositos.
+   * Verifica todas las wallets activas en busca de nuevos depósitos.
    */
   async checkAllDeposits() {
     const wallets = await Wallet.findAllActive();
+    
+    logger.info(`📋 [DEPOSIT SERVICE] Wallets activas encontradas en DB (${wallets.length}):`, 
+      wallets.map(w => ({ id: w.id, address: w.address }))
+    );
+
     const results = { checked: 0, newDeposits: 0, errors: 0 };
 
     for (const wallet of wallets) {
@@ -132,12 +179,11 @@ const DepositService = {
       }
     }
 
-    logger.info('Monitor de depositos completado', results);
     return results;
   },
 
   /**
-   * Obtiene el historial de depositos de un usuario.
+   * Obtiene el historial de depósitos de un usuario.
    */
   async getUserDeposits(userId, pagination) {
     return Deposit.findByUserId(userId, pagination);
@@ -145,24 +191,42 @@ const DepositService = {
 };
 
 /**
- * Acredita el balance al usuario dentro de una transaccion atomica.
- * Idempotente: el UNIQUE KEY en tx_hash previene doble acreditacion.
+ * Acredita el balance al usuario dentro de una transacción atómica.
  */
 async function creditBalance(deposit) {
   try {
     await transaction(async (conn) => {
+      // Acreditar balance al usuario
       await conn.execute(
         `UPDATE users SET balance = balance + ? WHERE id = ?`,
         [deposit.amount, deposit.user_id]
       );
+      
+      // Marcar depósito como acreditado
       await conn.execute(
         `UPDATE deposits SET status = ?, credited_at = NOW() WHERE id = ?`,
         [DEPOSIT_STATUS.CREDITED, deposit.id]
       );
+      
+      // Actualizar balance de la wallet
       await conn.execute(
         `UPDATE wallets SET current_balance = current_balance + ?, total_received = total_received + ? WHERE id = ?`,
         [deposit.amount, deposit.amount, deposit.wallet_id]
       );
+      
+      // Actualizar orden a PAID si existe y está pendiente de pago
+      const [orderUpdate] = await conn.execute(
+        `UPDATE orders SET status = 'paid', payment_tx_hash = ?, paid_at = NOW() 
+         WHERE wallet_id = ? AND status = 'pending_payment'`,
+        [deposit.tx_hash, deposit.wallet_id]
+      );
+      
+      if (orderUpdate.affectedRows > 0) {
+        logger.info('✅ Orden actualizada a PAID', { 
+          walletId: deposit.wallet_id, 
+          txHash: deposit.tx_hash 
+        });
+      }
     });
 
     await AuditLog.create({
@@ -170,13 +234,13 @@ async function creditBalance(deposit) {
       action: AUDIT_ACTIONS.DEPOSIT_CREDITED,
       resourceType: 'deposit',
       resourceId: deposit.id,
-      details: { amount: deposit.amount },
+      details: { amount: deposit.amount, txHash: deposit.tx_hash },
     });
 
-    logger.info('Balance acreditado', { userId: deposit.user_id, amount: deposit.amount });
+    logger.info('✅ Balance acreditado', { userId: deposit.user_id, amount: deposit.amount });
   } catch (err) {
     if (err.code === 'ER_DUP_ENTRY') {
-      logger.warn('Deposito ya acreditado (idempotencia)', { depositId: deposit.id });
+      logger.warn('Depósito ya acreditado (idempotencia)', { depositId: deposit.id });
       return;
     }
     throw err;
@@ -192,10 +256,29 @@ async function getCurrentBlock() {
   }
 }
 
+/**
+ * Convierte el valor en unidades base (sun/6 decimales) a string decimal (USDT)
+ */
 function extractTransferValue(tx) {
-  if (tx.value) return (BigInt(tx.value) / BigInt(1_000_000)).toString();
-  if (tx.value_info?.amount) return (BigInt(tx.value_info.amount) / BigInt(1_000_000)).toString();
-  return '0';
+  const rawValue = tx.value || tx.value_info?.amount || tx.amount;
+  
+  logger.info(`🔢 [DEPOSIT SERVICE] extractTransferValue:`, {
+    tx_value: tx.value,
+    tx_value_info: tx.value_info,
+    tx_amount: tx.amount,
+    rawValue,
+  });
+  
+  if (!rawValue) return '0';
+
+  // TRX / USDT TRC-20 usan 6 decimales (1,000,000 = 1 USDT)
+  const decimals = tx.token_info?.decimals || 6;
+  const parsedValue = Number(rawValue) / Math.pow(10, decimals);
+
+  const result = parsedValue.toFixed(2);
+  logger.info(`🔢 [DEPOSIT SERVICE] Valor calculado:`, { decimals, parsedValue, result });
+  
+  return result;
 }
 
 export default DepositService;

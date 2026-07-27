@@ -11,6 +11,9 @@ export default function DepositsPage() {
 
   useEffect(() => {
     loadDeposits()
+    // Polling cada 10 segundos para actualizar depósitos
+    const interval = setInterval(loadDeposits, 10000)
+    return () => clearInterval(interval)
   }, [pagination.page])
 
   const loadDeposits = async () => {

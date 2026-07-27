@@ -12,6 +12,9 @@ export default function OrdersPage() {
 
   useEffect(() => {
     loadOrders()
+    // Polling cada 10 segundos para actualizar órdenes
+    const interval = setInterval(loadOrders, 10000)
+    return () => clearInterval(interval)
   }, [pagination.page])
 
   const loadOrders = async () => {

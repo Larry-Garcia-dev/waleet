@@ -6,13 +6,13 @@
   "type": "module",
   "scripts": {
     "start": "node src/server.js",
-    "dev": "concurrently -n \"API,WEB\" -c \"blue,green\" \"npm run dev:api\" \"npm run dev:web\"",
+    "dev": "concurrently -n \"API,WEB,MONITOR,SWEEP\" -c \"blue,green,magenta,yellow\" \"npm run dev:api\" \"npm run dev:web\" \"npm run job:deposits\" \"npm run job:sweep\"",
     "dev:api": "node --watch src/server.js",
     "dev:web": "npm --prefix client run dev",
     "install:all": "npm install && npm --prefix client install",
     "db:setup": "node src/scripts/setupDatabase.js",
-    "job:deposits": "node src/jobs/depositMonitor.js",
-    "job:sweep": "node src/jobs/sweepJob.js",
+    "job:deposits": "node --watch src/jobs/depositMonitor.js",
+    "job:sweep": "node --watch src/jobs/sweepJob.js",
     "lint": "eslint src/"
   },
   "keywords": [
